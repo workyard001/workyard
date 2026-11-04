@@ -1,6 +1,7 @@
+
 "use client";
 
-import { useEffect, useState, FormEvent } from "react";
+import { Suspense, useEffect, useState, FormEvent } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 import { MapPin, ArrowLeft, BriefcaseBusiness } from "lucide-react";
@@ -15,7 +16,7 @@ type Job = {
   created_at: string;
 };
 
-export default function ViewJobPage() {
+function JobViewContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const jobId = searchParams.get("id");
@@ -111,11 +112,7 @@ export default function ViewJobPage() {
   }
 
   if (loading) {
-    return (
-      <main className="dashboard-loading">
-        Loading job details...
-      </main>
-    );
+    return <main className="dashboard-loading">Loading job details...</main>;
   }
 
   return (
@@ -189,9 +186,7 @@ export default function ViewJobPage() {
               </>
             )}
 
-            {message && (
-              <p className="profile-message">{message}</p>
-            )}
+            {message && <p className="profile-message">{message}</p>}
           </>
         ) : (
           <div>
@@ -201,5 +196,15 @@ export default function ViewJobPage() {
         )}
       </div>
     </main>
+  );
+}
+
+export default function ViewJobPage() {
+  return (
+    <Suspense
+      fallback={<main className="dashboard-loading">Loading job details...</main>}
+    >
+      <JobViewContent />
+    </Suspense>
   );
 }
