@@ -16,7 +16,7 @@ type Application = {
     title: string;
     location: string;
     description: string;
-  } | null;
+  }[] | null;
 };
 
 export default function ApplicationsPage() {
@@ -107,14 +107,16 @@ export default function ApplicationsPage() {
                 marginTop: "16px",
               }}
             >
-              <h2>{application.jobs?.title || "Job no longer available"}</h2>
+              <h2>
+                {application.jobs?.[0]?.title || "Job no longer available"}
+              </h2>
 
-              {application.jobs && (
+              {application.jobs?.[0] && (
                 <>
                   <p>
-                    <MapPin size={15} /> {application.jobs.location}
+                    <MapPin size={15} /> {application.jobs[0].location}
                   </p>
-                  <p>{application.jobs.description}</p>
+                  <p>{application.jobs[0].description}</p>
                 </>
               )}
 
