@@ -26,7 +26,7 @@ export default function LoginPage() {
       return;
     }
 
-    router.push("/dashboard/");
+    router.replace("/");
     router.refresh();
   }
 
@@ -52,6 +52,12 @@ export default function LoginPage() {
           <label>Password
             <input required type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
           </label>
+
+          <div style={{ display: "flex", justifyContent: "flex-end", marginTop: "-8px" }}>
+            <Link className="auth-link" href="/forgot-password/">
+              Forgot password?
+            </Link>
+          </div>
 
           {message && <p className="auth-message" role="status">{message}</p>}
 

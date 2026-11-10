@@ -70,8 +70,8 @@ export default function JobsPage() {
   return (
     <main className="profile-page">
       <div className="profile-card" style={{ maxWidth: "850px" }}>
-        <a href="/dashboard/" className="profile-back">
-          ← Back to dashboard
+        <a href="/" className="profile-back">
+          ← Back to Home
         </a>
 
         <h1>Find Work in Your Community</h1>

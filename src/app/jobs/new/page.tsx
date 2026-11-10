@@ -3,6 +3,9 @@
 import { useEffect, useState, FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
+import NigeriaLocationFields, {
+  isValidNigeriaLocation,
+} from "@/components/NigeriaLocationFields";
 
 export default function NewJobPage() {
   const router = useRouter();
@@ -10,7 +13,9 @@ export default function NewJobPage() {
   const [userId, setUserId] = useState("");
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
-  const [location, setLocation] = useState("");
+  const [community, setCommunity] = useState("");
+  const [lga, setLga] = useState("");
+  const [stateName, setStateName] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
@@ -36,11 +41,31 @@ export default function NewJobPage() {
     setSaving(true);
     setMessage("");
 
+    if (!isValidNigeriaLocation(stateName, lga)) {
+      setMessage("Please select a valid Nigerian state and an LGA within that state.");
+      setSaving(false);
+      return;
+    }
+
+    if (!community.trim()) {
+      setMessage("Please enter your community or nearest landmark.");
+      setSaving(false);
+      return;
+    }
+
+    const formattedLocation = [community, lga, stateName]
+      .map((value) => value.trim())
+      .filter(Boolean)
+      .join(", ");
+
     const { error } = await supabase.from("jobs").insert({
       owner_id: userId,
       title: title.trim(),
       description: description.trim(),
-      location: location.trim(),
+      community: community.trim(),
+      lga: lga.trim(),
+      state: stateName.trim(),
+      location: formattedLocation,
       status: "open",
     });
 
@@ -53,7 +78,9 @@ export default function NewJobPage() {
     setMessage("Your job has been posted successfully!");
     setTitle("");
     setDescription("");
-    setLocation("");
+    setCommunity("");
+    setLga("");
+    setStateName("");
     setSaving(false);
   }
 
@@ -64,8 +91,8 @@ export default function NewJobPage() {
   return (
     <main className="profile-page">
       <div className="profile-card">
-        <a href="/dashboard/" className="profile-back">
-          ← Back to dashboard
+        <a href="/" className="profile-back">
+          ← Back to Home
         </a>
 
         <h1>Post a Job</h1>
@@ -93,15 +120,15 @@ export default function NewJobPage() {
             />
           </label>
 
-          <label>
-            Location (community / LGA)
-            <input
-              value={location}
-              onChange={(event) => setLocation(event.target.value)}
-              placeholder="e.g. Akungba-Akoko"
-              required
-            />
-          </label>
+          <NigeriaLocationFields
+            stateValue={stateName}
+            lgaValue={lga}
+            communityValue={community}
+            onStateChange={setStateName}
+            onLgaChange={setLga}
+            onCommunityChange={setCommunity}
+            required
+          />
 
           <button type="submit" disabled={saving}>
             {saving ? "Posting..." : "Post Job"}

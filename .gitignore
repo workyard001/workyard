@@ -16,3 +16,10 @@ out/
 # Local OS files
 .DS_Store
 Thumbs.db
+# Editor swap and backup files
+*.swp
+*.bak
+
+# Editor and backup files
+*.swp
+*.bak
