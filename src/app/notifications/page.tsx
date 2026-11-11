@@ -63,6 +63,45 @@ export default function NotificationsPage() {
     void loadNotifications();
   }, [loadNotifications]);
 
+  // Receive new notifications for the signed-in member in real time.
+  useEffect(() => {
+    if (!userId) return;
+
+    const channel = supabase
+      .channel(`notifications:${userId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "notifications",
+          filter: `user_id=eq.${userId}`,
+        },
+        (payload) => {
+          const incoming = payload.new as Notification;
+
+          setNotifications((current) => {
+            if (current.some((item) => item.id === incoming.id)) {
+              return current;
+            }
+
+            return [incoming, ...current].slice(0, 50);
+          });
+        }
+      )
+      .subscribe((status) => {
+        if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+          setMessage(
+            "Live notification connection is unavailable. Use Refresh to check for updates."
+          );
+        }
+      });
+
+    return () => {
+      void supabase.removeChannel(channel);
+    };
+  }, [userId]);
+
   const unreadCount = notifications.filter(
     (item) => !item.read_at
   ).length;
