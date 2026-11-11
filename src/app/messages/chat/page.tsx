@@ -4,7 +4,7 @@ import { Suspense, useEffect, useState, useRef, FormEvent } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { supabase } from "@/lib/supabase";
-import { ArrowLeft, Send, RefreshCw, Flag } from "lucide-react";
+import { ArrowLeft, Send, RefreshCw, Flag, Phone, Video } from "lucide-react";
 
 type Conversation = {
   conversation_id: string;
@@ -35,6 +35,7 @@ function ChatContent() {
   const [draft, setDraft] = useState("");
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
+  const [callStarting, setCallStarting] = useState<"audio" | "video" | null>(null);
   const [message, setMessage] = useState("");
   const [reportSubmitting, setReportSubmitting] = useState<string | null>(null);
   const [realtimeStatus, setRealtimeStatus] = useState("CONNECTING");
@@ -432,6 +433,42 @@ function ChatContent() {
   }
 
 
+  async function startCall(callType: "audio" | "video") {
+    if (!conversationId || callStarting) return;
+
+    setCallStarting(callType);
+    setMessage("");
+
+    try {
+      const { data, error } = await supabase.rpc("start_workyard_call", {
+        p_conversation_id: conversationId,
+        p_call_type: callType,
+      });
+
+      if (error) throw error;
+
+      const result = Array.isArray(data) ? data[0] : data;
+      const callId =
+        result && typeof result === "object" && "call_id" in result
+          ? String(result.call_id)
+          : "";
+
+      if (!callId || callId === "undefined" || callId === "null") {
+        throw new Error("The call service did not return a call ID.");
+      }
+
+      router.push(`/messages/call/?id=${encodeURIComponent(callId)}`);
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? `Could not start call: ${error.message}`
+          : "Could not start the call. Please try again."
+      );
+    } finally {
+      setCallStarting(null);
+    }
+  }
+
   async function reportMessage(item: ChatMessage) {
     if (!userId || item.sender_id === userId || reportSubmitting) return;
 
@@ -580,6 +617,28 @@ function ChatContent() {
                       : "○ Offline"}
                 </p>
               </div>
+
+              <button
+                type="button"
+                className="btn btn-outline"
+                onClick={() => void startCall("audio")}
+                disabled={!!callStarting}
+                title="Start audio call"
+              >
+                <Phone size={16} />
+                {callStarting === "audio" ? "Calling..." : "Audio"}
+              </button>
+
+              <button
+                type="button"
+                className="btn btn-outline"
+                onClick={() => void startCall("video")}
+                disabled={!!callStarting}
+                title="Start video call"
+              >
+                <Video size={16} />
+                {callStarting === "video" ? "Calling..." : "Video"}
+              </button>
 
               <button
                 type="button"
