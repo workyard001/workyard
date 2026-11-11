@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useEffect, useState, FormEvent } from "react";
+import { Suspense, useEffect, useState, useRef, FormEvent } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { supabase } from "@/lib/supabase";
@@ -8,6 +8,7 @@ import { ArrowLeft, Send, RefreshCw, Flag } from "lucide-react";
 
 type Conversation = {
   conversation_id: string;
+  other_user_id: string;
   job_title: string;
   other_user_name: string;
   other_avatar_path: string | null;
@@ -36,6 +37,14 @@ function ChatContent() {
   const [sending, setSending] = useState(false);
   const [message, setMessage] = useState("");
   const [reportSubmitting, setReportSubmitting] = useState<string | null>(null);
+  const [realtimeStatus, setRealtimeStatus] = useState("CONNECTING");
+  const [otherOnline, setOtherOnline] = useState(false);
+  const [otherTyping, setOtherTyping] = useState(false);
+
+  const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
+  const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const otherTypingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const typingActiveRef = useRef(false);
 
   async function loadMessages(id: string, currentUserId: string) {
     const { data, error } = await supabase
@@ -52,15 +61,25 @@ function ChatContent() {
     const loaded = (data || []) as ChatMessage[];
     setMessages(loaded);
 
+    const readAt = new Date().toISOString();
+
     const { error: readError } = await supabase
       .from("messages")
-      .update({ read_at: new Date().toISOString() })
+      .update({ read_at: readAt })
       .eq("conversation_id", id)
       .neq("sender_id", currentUserId)
       .is("read_at", null);
 
     if (readError) {
       setMessage(`Messages loaded, but read receipts could not be updated: ${readError.message}`);
+    } else {
+      setMessages((current) =>
+        current.map((item) =>
+          item.sender_id !== currentUserId && !item.read_at
+            ? { ...item, read_at: readAt }
+            : item
+        )
+      );
     }
   }
 
@@ -134,11 +153,263 @@ function ChatContent() {
     };
   }, [router, conversationId]);
 
+  // Subscribe only to messages in this conversation.
+  useEffect(() => {
+    if (!conversationId || !userId) return;
+
+    let active = true;
+    setRealtimeStatus("CONNECTING");
+
+    const otherUserId = conversation?.other_user_id;
+    if (!otherUserId) return;
+
+    const channel = supabase.channel(`conversation:${conversationId}`, {
+      config: {
+        private: true,
+        presence: { key: userId },
+        broadcast: { self: false },
+      },
+    });
+
+    channelRef.current = channel;
+
+    channel
+      .on(
+        "presence",
+        { event: "sync" },
+        () => {
+          if (!active) return;
+
+          const presenceState = channel.presenceState();
+          const isOnline = Object.keys(presenceState).includes(otherUserId);
+
+          setOtherOnline(isOnline);
+
+          if (!isOnline) {
+            setOtherTyping(false);
+            if (otherTypingTimeoutRef.current) {
+              clearTimeout(otherTypingTimeoutRef.current);
+              otherTypingTimeoutRef.current = null;
+            }
+          }
+        }
+      )
+      .on(
+        "broadcast",
+        { event: "typing" },
+        ({ payload }) => {
+          if (!active || payload?.user_id !== otherUserId) return;
+
+          const isTyping = payload?.is_typing === true;
+          setOtherTyping(isTyping);
+
+          if (otherTypingTimeoutRef.current) {
+            clearTimeout(otherTypingTimeoutRef.current);
+            otherTypingTimeoutRef.current = null;
+          }
+
+          // Clear stale typing indicators if a stop event is missed.
+          if (isTyping) {
+            otherTypingTimeoutRef.current = setTimeout(() => {
+              setOtherTyping(false);
+              otherTypingTimeoutRef.current = null;
+            }, 4000);
+          }
+        }
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "messages",
+          filter: `conversation_id=eq.${conversationId}`,
+        },
+        (payload) => {
+          const incoming = payload.new as ChatMessage;
+          if (!incoming?.id || !active) return;
+
+          setMessages((current) => {
+            const exists = current.some((item) => item.id === incoming.id);
+            const next = exists
+              ? current.map((item) =>
+                  item.id === incoming.id ? { ...item, ...incoming } : item
+                )
+              : [...current, incoming];
+
+            return [...next].sort(
+              (a, b) =>
+                new Date(a.created_at).getTime() -
+                new Date(b.created_at).getTime()
+            );
+          });
+
+          // Automatically mark incoming messages as read while this chat is open.
+          if (incoming.sender_id !== userId && !incoming.read_at) {
+            void (async () => {
+              const readAt = new Date().toISOString();
+
+              const { error: readError } = await supabase
+                .from("messages")
+                .update({ read_at: readAt })
+                .eq("id", incoming.id)
+                .eq("conversation_id", conversationId)
+                .neq("sender_id", userId)
+                .is("read_at", null);
+
+              if (!active) return;
+
+              if (readError) {
+                setMessage(
+                  `New message received, but its read receipt could not be updated: ${readError.message}`
+                );
+              } else {
+                setMessages((current) =>
+                  current.map((item) =>
+                    item.id === incoming.id
+                      ? { ...item, read_at: item.read_at || readAt }
+                      : item
+                  )
+                );
+              }
+            })();
+          }
+        }
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "messages",
+          filter: `conversation_id=eq.${conversationId}`,
+        },
+        (payload) => {
+          const updated = payload.new as ChatMessage;
+          if (!updated?.id || !active) return;
+
+          // Update read receipts on the sender's screen.
+          setMessages((current) =>
+            current.map((item) =>
+              item.id === updated.id
+                ? { ...item, read_at: updated.read_at }
+                : item
+            )
+          );
+        }
+      )
+      .subscribe(async (status) => {
+        if (!active) return;
+
+        setRealtimeStatus(status);
+
+        if (status === "SUBSCRIBED") {
+          try {
+            await channel.track({
+              user_id: userId,
+              online_at: new Date().toISOString(),
+            });
+          } catch {
+            if (active) {
+              setMessage(
+                "Live messages are connected, but online status could not be shared."
+              );
+            }
+          }
+        }
+
+        if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+          setMessage(
+            "Live message updates are unavailable. Use Refresh to check for new messages."
+          );
+        }
+      });
+
+    return () => {
+      active = false;
+
+      if (typingTimeoutRef.current) {
+        clearTimeout(typingTimeoutRef.current);
+        typingTimeoutRef.current = null;
+      }
+
+      if (otherTypingTimeoutRef.current) {
+        clearTimeout(otherTypingTimeoutRef.current);
+        otherTypingTimeoutRef.current = null;
+      }
+
+      typingActiveRef.current = false;
+
+      if (channelRef.current === channel) {
+        channelRef.current = null;
+      }
+
+      void channel.untrack();
+      void supabase.removeChannel(channel);
+    };
+  }, [conversationId, userId, conversation?.other_user_id]);
+
+  function broadcastTyping(isTyping: boolean) {
+    const channel = channelRef.current;
+
+    if (!channel || realtimeStatus !== "SUBSCRIBED") return;
+
+    void channel.send({
+      type: "broadcast",
+      event: "typing",
+      payload: {
+        user_id: userId,
+        is_typing: isTyping,
+      },
+    });
+  }
+
+  function handleDraftChange(value: string) {
+    setDraft(value);
+
+    if (realtimeStatus !== "SUBSCRIBED") return;
+
+    if (value.trim()) {
+      if (!typingActiveRef.current) {
+        typingActiveRef.current = true;
+        broadcastTyping(true);
+      }
+
+      if (typingTimeoutRef.current) {
+        clearTimeout(typingTimeoutRef.current);
+      }
+
+      typingTimeoutRef.current = setTimeout(() => {
+        typingActiveRef.current = false;
+        broadcastTyping(false);
+        typingTimeoutRef.current = null;
+      }, 1500);
+    } else if (typingActiveRef.current) {
+      typingActiveRef.current = false;
+
+      if (typingTimeoutRef.current) {
+        clearTimeout(typingTimeoutRef.current);
+        typingTimeoutRef.current = null;
+      }
+
+      broadcastTyping(false);
+    }
+  }
+
   async function handleSend(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
     const body = draft.trim();
     if (!body || !conversationId || !userId || sending) return;
+
+    typingActiveRef.current = false;
+
+    if (typingTimeoutRef.current) {
+      clearTimeout(typingTimeoutRef.current);
+      typingTimeoutRef.current = null;
+    }
+
+    broadcastTyping(false);
 
     setSending(true);
     setMessage("");
@@ -281,6 +552,33 @@ function ChatContent() {
                 <p style={{ margin: "5px 0 0", color: "#64748b", fontSize: "13px" }}>
                   Job: {conversation.job_title}
                 </p>
+                <p
+                  style={{
+                    margin: "5px 0 0",
+                    color: realtimeStatus === "SUBSCRIBED" ? "#0B7A42" : "#64748b",
+                    fontSize: "12px",
+                  }}
+                >
+                  {realtimeStatus === "SUBSCRIBED"
+                    ? "● Live message updates connected"
+                    : realtimeStatus === "CHANNEL_ERROR" || realtimeStatus === "TIMED_OUT"
+                      ? "Live updates unavailable · use Refresh"
+                      : "Connecting to live messages..."}
+                </p>
+                <p
+                  style={{
+                    margin: "5px 0 0",
+                    color: otherOnline ? "#0B7A42" : "#87938b",
+                    fontSize: "12px",
+                    fontWeight: otherTyping ? 700 : 500,
+                  }}
+                >
+                  {otherTyping
+                    ? "● Typing..."
+                    : otherOnline
+                      ? "● Online"
+                      : "○ Offline"}
+                </p>
               </div>
 
               <button
@@ -383,7 +681,7 @@ function ChatContent() {
             }}>
               <textarea
                 value={draft}
-                onChange={(event) => setDraft(event.target.value)}
+                onChange={(event) => handleDraftChange(event.target.value)}
                 rows={2}
                 maxLength={4000}
                 placeholder="Write a message..."

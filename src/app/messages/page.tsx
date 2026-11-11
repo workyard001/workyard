@@ -27,6 +27,7 @@ export default function MessagesPage() {
 
   useEffect(() => {
     let active = true;
+    let channel: ReturnType<typeof supabase.channel> | null = null;
 
     async function loadConversations() {
       const { data: authData, error: authError } =
@@ -35,6 +36,35 @@ export default function MessagesPage() {
       if (authError || !authData.user) {
         router.replace("/login/");
         return;
+      }
+
+      // RLS on messages limits these events to conversations this member can read.
+      if (!channel) {
+        channel = supabase
+          .channel(`messages-inbox:${authData.user.id}`)
+          .on(
+            "postgres_changes",
+            {
+              event: "*",
+              schema: "public",
+              table: "messages",
+            },
+            () => {
+              if (active) {
+                void loadConversations();
+              }
+            }
+          )
+          .subscribe((status) => {
+            if (
+              active &&
+              (status === "CHANNEL_ERROR" || status === "TIMED_OUT")
+            ) {
+              setMessage(
+                "Live inbox updates are unavailable. Reopen or refresh this page to check for new messages."
+              );
+            }
+          });
       }
 
       const { data, error } = await supabase.rpc("get_my_conversations_v2");
@@ -73,6 +103,9 @@ export default function MessagesPage() {
 
     return () => {
       active = false;
+      if (channel) {
+        void supabase.removeChannel(channel);
+      }
     };
   }, [router]);
 
