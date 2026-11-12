@@ -244,7 +244,9 @@ export default function FindWorkersPage() {
                     <p style={{ color: "#64748b", fontSize: 13, margin: "0 0 10px" }}>
                       {person?.full_name || "WORKYARD provider"}
                       {isIdentityApproved(person?.verification_status) && (
-                        <BadgeCheck size={14} aria-label="Identity verified" title="Identity verified" style={{ verticalAlign: "middle", color: "#0B7A42", marginLeft: 4 }} />
+                      <span title="Identity verified">
+  <BadgeCheck size={14} aria-label="Identity verified" style={{ verticalAlign: "middle", color: "#0B7A42", marginLeft: 4 }} />
+</span>
                       )}
                     </p>
 
