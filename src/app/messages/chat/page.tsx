@@ -1,11 +1,11 @@
 "use client";
 
-import { Suspense, useEffect, useState, useRef, FormEvent } from "react";
+import { Suspense, useEffect, useState, useRef, FormEvent, ChangeEvent } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 import WorkOrderTrustPanel from "@/components/WorkOrderTrustPanel";
-import { ArrowLeft, Send, RefreshCw, Flag, Phone, Video } from "lucide-react";
+import { ArrowLeft, Send, RefreshCw, Flag, Phone, Video, Paperclip, FileText, Mic, Square } from "lucide-react";
 
 type Conversation = {
   conversation_id: string;
@@ -23,6 +23,19 @@ type ChatMessage = {
   body: string;
   created_at: string;
   read_at: string | null;
+};
+
+type MessageAttachment = {
+  id: string;
+  message_id: string;
+  conversation_id: string;
+  sender_id: string;
+  file_name: string;
+  mime_type: string;
+  file_size_bytes: number;
+  storage_path: string;
+  created_at: string;
+  signed_url?: string | null;
 };
 
 type WorkOrder = {
@@ -64,12 +77,59 @@ function ChatContent() {
   const [agreementSubmitting, setAgreementSubmitting] = useState(false);
   const [agreementBusyId, setAgreementBusyId] = useState("");
   const [agreementNotice, setAgreementNotice] = useState("");
+  const [attachments, setAttachments] = useState<Record<string, MessageAttachment[]>>({});
+  const [attachmentBusy, setAttachmentBusy] = useState(false);
+  const [attachmentNotice, setAttachmentNotice] = useState("");
+  const [recording, setRecording] = useState(false);
 
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recordingStreamRef = useRef<MediaStream | null>(null);
+  const recordedChunksRef = useRef<Blob[]>([]);
 
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
   const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const otherTypingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const typingActiveRef = useRef(false);
+
+  async function loadAttachments(id: string, messageIds: string[]) {
+    if (messageIds.length === 0) {
+      setAttachments({});
+      return;
+    }
+
+    const { data, error } = await supabase
+      .from("message_attachments")
+      .select("id,message_id,conversation_id,sender_id,file_name,mime_type,file_size_bytes,storage_path,created_at")
+      .eq("conversation_id", id)
+      .in("message_id", messageIds)
+      .order("created_at", { ascending: true });
+
+    if (error) {
+      setAttachmentNotice(`Could not load chat attachments: ${error.message}`);
+      return;
+    }
+
+    const grouped: Record<string, MessageAttachment[]> = {};
+    await Promise.all((data || []).map(async (row) => {
+      const attachment = row as MessageAttachment;
+      const downloadOptions = attachment.mime_type.startsWith("image/") || attachment.mime_type.startsWith("audio/")
+        ? undefined
+        : { download: attachment.file_name };
+      const { data: signedData } = await supabase.storage
+        .from("chat-attachments")
+        .createSignedUrl(attachment.storage_path, 3600, downloadOptions);
+
+      const ready: MessageAttachment = {
+        ...attachment,
+        signed_url: signedData?.signedUrl || null,
+      };
+      if (!grouped[ready.message_id]) grouped[ready.message_id] = [];
+      grouped[ready.message_id].push(ready);
+    }));
+
+    setAttachments(grouped);
+  }
 
   async function loadMessages(id: string, currentUserId: string) {
     const { data, error } = await supabase
@@ -85,6 +145,7 @@ function ChatContent() {
 
     const loaded = (data || []) as ChatMessage[];
     setMessages(loaded);
+    await loadAttachments(id, loaded.map((item) => item.id));
 
     const readAt = new Date().toISOString();
 
@@ -344,6 +405,41 @@ function ChatContent() {
       .on(
         "postgres_changes",
         {
+          event: "INSERT",
+          schema: "public",
+          table: "message_attachments",
+          filter: `conversation_id=eq.${conversationId}`,
+        },
+        (payload) => {
+          const incoming = payload.new as MessageAttachment;
+          if (!incoming?.id || !active) return;
+
+          void (async () => {
+            const downloadOptions = incoming.mime_type.startsWith("image/") || incoming.mime_type.startsWith("audio/")
+              ? undefined
+              : { download: incoming.file_name };
+            const { data: signedData } = await supabase.storage
+              .from("chat-attachments")
+              .createSignedUrl(incoming.storage_path, 3600, downloadOptions);
+            if (!active) return;
+
+            const ready: MessageAttachment = {
+              ...incoming,
+              signed_url: signedData?.signedUrl || null,
+            };
+            setAttachments((current) => ({
+              ...current,
+              [ready.message_id]: [
+                ...(current[ready.message_id] || []).filter((item) => item.id !== ready.id),
+                ready,
+              ],
+            }));
+          })();
+        }
+      )
+      .on(
+        "postgres_changes",
+        {
           event: "*",
           schema: "public",
           table: "work_orders",
@@ -450,6 +546,217 @@ function ChatContent() {
       broadcastTyping(false);
     }
   }
+
+  async function uploadAttachment(file: File) {
+    if (!conversationId || !userId || attachmentBusy) return;
+
+    const allowedTypes = [
+      "image/jpeg",
+      "image/png",
+      "image/webp",
+      "application/pdf",
+      "application/msword",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "audio/webm",
+      "audio/ogg",
+      "audio/mp4",
+      "audio/mpeg",
+      "audio/wav",
+    ];
+
+    if (!allowedTypes.includes(file.type)) {
+      setAttachmentNotice("This file type is not supported. Use JPG, PNG, WEBP, PDF, Word or a supported audio file.");
+      return;
+    }
+
+    if (file.size < 1 || file.size > 10 * 1024 * 1024) {
+      setAttachmentNotice("Each attachment must be smaller than or equal to 10 MB.");
+      return;
+    }
+
+    const isImage = file.type.startsWith("image/");
+    const isAudio = file.type.startsWith("audio/");
+    const safeName = file.name
+      .normalize("NFKC")
+      .replace(/[^a-zA-Z0-9._-]/g, "_")
+      .slice(-120) || "attachment";
+    const storagePath = `${conversationId}/${userId}/${crypto.randomUUID()}-${safeName}`;
+
+    setAttachmentBusy(true);
+    setAttachmentNotice("");
+
+    try {
+      const { error: uploadError } = await supabase.storage
+        .from("chat-attachments")
+        .upload(storagePath, file, {
+          contentType: file.type,
+          upsert: false,
+        });
+
+      if (uploadError) throw uploadError;
+
+      const body = isImage
+        ? `Shared an image: ${file.name}`
+        : isAudio
+          ? "Shared a voice note"
+          : `Shared a document: ${file.name}`;
+
+      const { data: messageData, error: messageError } = await supabase
+        .from("messages")
+        .insert({
+          conversation_id: conversationId,
+          sender_id: userId,
+          body,
+        })
+        .select("id,conversation_id,sender_id,body,created_at,read_at")
+        .single();
+
+      if (messageError || !messageData) {
+        await supabase.storage.from("chat-attachments").remove([storagePath]);
+        throw messageError || new Error("The attachment message could not be created.");
+      }
+
+      const { data: attachmentData, error: attachmentError } = await supabase
+        .from("message_attachments")
+        .insert({
+          message_id: messageData.id,
+          conversation_id: conversationId,
+          sender_id: userId,
+          file_name: file.name.slice(0, 255),
+          mime_type: file.type,
+          file_size_bytes: file.size,
+          storage_path: storagePath,
+        })
+        .select("id,message_id,conversation_id,sender_id,file_name,mime_type,file_size_bytes,storage_path,created_at")
+        .single();
+
+      if (attachmentError || !attachmentData) {
+        await supabase.storage.from("chat-attachments").remove([storagePath]);
+        throw attachmentError || new Error("The attachment record could not be saved.");
+      }
+
+      const { data: signedData, error: signedError } = await supabase.storage
+        .from("chat-attachments")
+        .createSignedUrl(storagePath, 3600);
+
+      if (signedError) throw signedError;
+
+      const readyAttachment: MessageAttachment = {
+        ...(attachmentData as MessageAttachment),
+        signed_url: signedData?.signedUrl || null,
+      };
+
+      setMessages((current) => {
+        const next = [...current.filter((item) => item.id !== messageData.id), messageData as ChatMessage];
+        return next.sort(
+          (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+        );
+      });
+      setAttachments((current) => ({
+        ...current,
+        [messageData.id]: [
+          ...(current[messageData.id] || []).filter((item) => item.id !== readyAttachment.id),
+          readyAttachment,
+        ],
+      }));
+      setAttachmentNotice("Attachment shared successfully.");
+    } catch (error) {
+      setAttachmentNotice(
+        error instanceof Error ? error.message : "The attachment could not be shared. Please try again."
+      );
+    } finally {
+      setAttachmentBusy(false);
+    }
+  }
+
+  async function handleAttachmentSelection(event: ChangeEvent<HTMLInputElement>) {
+    const selectedFiles = Array.from(event.target.files || []);
+    event.target.value = "";
+
+    for (const file of selectedFiles) {
+      await uploadAttachment(file);
+    }
+  }
+
+  async function toggleVoiceRecording() {
+    if (recording) {
+      mediaRecorderRef.current?.stop();
+      setRecording(false);
+      return;
+    }
+
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+      setAttachmentNotice("Voice recording is not supported by this browser.");
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      recordingStreamRef.current = stream;
+      recordedChunksRef.current = [];
+
+      const supportedMime = [
+        "audio/webm;codecs=opus",
+        "audio/ogg;codecs=opus",
+        "audio/mp4",
+      ].find((mime) => MediaRecorder.isTypeSupported(mime));
+
+      const recorder = new MediaRecorder(
+        stream,
+        supportedMime ? { mimeType: supportedMime } : undefined
+      );
+      mediaRecorderRef.current = recorder;
+
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) recordedChunksRef.current.push(event.data);
+      };
+
+      recorder.onstop = () => {
+        const rawMime = (recorder.mimeType || "audio/webm").split(";")[0].toLowerCase();
+        const mimeType = ["audio/webm", "audio/ogg", "audio/mp4"].includes(rawMime)
+          ? rawMime
+          : "audio/webm";
+        const extension = mimeType === "audio/ogg" ? "ogg" : mimeType === "audio/mp4" ? "m4a" : "webm";
+        const blob = new Blob(recordedChunksRef.current, { type: mimeType });
+        const voiceFile = new File([blob], `voice-note-${Date.now()}.${extension}`, {
+          type: mimeType,
+        });
+
+        recordingStreamRef.current?.getTracks().forEach((track) => track.stop());
+        recordingStreamRef.current = null;
+        mediaRecorderRef.current = null;
+        recordedChunksRef.current = [];
+
+        if (voiceFile.size === 0) {
+          setAttachmentNotice("The voice note was empty. Please record it again.");
+        } else {
+          void uploadAttachment(voiceFile);
+        }
+      };
+
+      recorder.start();
+      setRecording(true);
+      setAttachmentNotice("Recording voice note. Select Stop & send when finished.");
+    } catch (error) {
+      recordingStreamRef.current?.getTracks().forEach((track) => track.stop());
+      recordingStreamRef.current = null;
+      setRecording(false);
+      setAttachmentNotice(
+        error instanceof Error ? `Could not start recording: ${error.message}` : "Could not start voice recording."
+      );
+    }
+  }
+
+  useEffect(() => {
+    return () => {
+      const recorder = mediaRecorderRef.current;
+      if (recorder) {
+        recorder.onstop = null;
+        if (recorder.state !== "inactive") recorder.stop();
+      }
+      recordingStreamRef.current?.getTracks().forEach((track) => track.stop());
+    };
+  }, []);
 
   async function handleSend(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1062,6 +1369,63 @@ function ChatContent() {
                     }}>
                       {item.body}
                     </p>
+
+                    {(attachments[item.id] || []).map((attachment) => (
+                      <div
+                        key={attachment.id}
+                        style={{
+                          marginTop: 10,
+                          maxWidth: "min(100%, 360px)",
+                          overflowWrap: "anywhere",
+                        }}
+                      >
+                        {attachment.mime_type.startsWith("image/") && attachment.signed_url ? (
+                          <a href={attachment.signed_url} target="_blank" rel="noreferrer">
+                            <img
+                              src={attachment.signed_url}
+                              alt={attachment.file_name}
+                              style={{
+                                display: "block",
+                                maxWidth: "100%",
+                                maxHeight: 260,
+                                borderRadius: 10,
+                                objectFit: "contain",
+                                background: "#fff",
+                              }}
+                            />
+                          </a>
+                        ) : attachment.mime_type.startsWith("audio/") && attachment.signed_url ? (
+                          <audio controls preload="none" src={attachment.signed_url} style={{ maxWidth: "100%" }}>
+                            Your browser does not support audio playback.
+                          </audio>
+                        ) : (
+                          <a
+                            href={attachment.signed_url || undefined}
+                            target="_blank"
+                            rel="noreferrer"
+                            download={attachment.file_name}
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: 8,
+                              padding: 10,
+                              border: "1px solid #dce8df",
+                              borderRadius: 9,
+                              background: "#fff",
+                              color: "#0B7A42",
+                              textDecoration: "none",
+                            }}
+                          >
+                            <FileText size={19} />
+                            <span>{attachment.file_name}</span>
+                          </a>
+                        )}
+                        <small style={{ color: "#64748b" }}>
+                          {(attachment.file_size_bytes / 1024 / 1024).toFixed(2)} MB
+                        </small>
+                      </div>
+                    ))}
+
                     <small style={{
                       display: "block",
                       textAlign: "right",
@@ -1133,6 +1497,47 @@ function ChatContent() {
                 {sending ? "Sending..." : "Send"}
               </button>
             </form>
+
+            <div style={{
+              display: "flex",
+              gap: 10,
+              alignItems: "center",
+              flexWrap: "wrap",
+              paddingTop: 12,
+            }}>
+              <input
+                ref={fileInputRef}
+                type="file"
+                hidden
+                multiple
+                accept="image/jpeg,image/png,image/webp,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,audio/webm,audio/ogg,audio/mp4,audio/mpeg,audio/wav"
+                onChange={(event) => void handleAttachmentSelection(event)}
+              />
+              <button
+                type="button"
+                className="btn btn-outline"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={attachmentBusy || recording}
+              >
+                <Paperclip size={16} />
+                {attachmentBusy ? "Uploading..." : "Attach file"}
+              </button>
+              <button
+                type="button"
+                className="btn btn-outline"
+                onClick={() => void toggleVoiceRecording()}
+                disabled={attachmentBusy}
+              >
+                {recording ? <Square size={15} /> : <Mic size={16} />}
+                {recording ? "Stop & send voice note" : "Record voice note"}
+              </button>
+              <small style={{ color: "#64748b" }}>
+                Images, PDF, Word documents and voice notes · Max 10 MB per file
+              </small>
+            </div>
+            {attachmentNotice && (
+              <p className="auth-message" role="status">{attachmentNotice}</p>
+            )}
           </>
         ) : (
           <>
