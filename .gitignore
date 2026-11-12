@@ -23,3 +23,7 @@ Thumbs.db
 # Editor and backup files
 *.swp
 *.bak
+
+# Local-only files
+.vscode/
+INSTALL.txt
