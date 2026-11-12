@@ -1,0 +1,19 @@
+WORKYARD — PHASE 5 TRUST & VERIFICATION ADD-ON
+
+Files in this package:
+- src/components/WorkOrderTrustPanel.tsx
+- src/components/ProfileReviews.tsx
+- supabase/get-my-work-order-review-status.sql
+- scripts/install-phase5-trust.mjs
+
+INSTALL
+1. Extract this ZIP into the root of your existing WORKYARD project (the folder containing package.json). Allow folders to merge; do not delete or replace your existing files.
+2. Open supabase/get-my-work-order-review-status.sql, paste its full contents into Supabase SQL Editor, and run it.
+3. In Git Bash, from the WORKYARD project root, run:
+     node scripts/install-phase5-trust.mjs
+4. Run:
+     npm run build
+
+The installer adds the trust panel to the existing chat page and the review section to the existing public profile page. It does not replace either page. The installer is safe to run a second time; it will not add duplicate imports or components.
+
+The provider can submit work for completion. The client confirms it. Only then can each participant submit one review of the other participant for that work order. Existing messaging, calls, work-agreement proposal/accept/decline/withdraw features remain in place.

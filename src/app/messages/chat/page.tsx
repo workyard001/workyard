@@ -4,6 +4,7 @@ import { Suspense, useEffect, useState, useRef, FormEvent } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { supabase } from "@/lib/supabase";
+import WorkOrderTrustPanel from "@/components/WorkOrderTrustPanel";
 import { ArrowLeft, Send, RefreshCw, Flag, Phone, Video } from "lucide-react";
 
 type Conversation = {
@@ -24,6 +25,21 @@ type ChatMessage = {
   read_at: string | null;
 };
 
+type WorkOrder = {
+  id: string;
+  conversation_id: string;
+  client_id: string;
+  provider_id: string;
+  proposed_by: string;
+  proposed_to: string;
+  title: string;
+  description: string;
+  amount_kobo: number | string;
+  currency: string;
+  status: string;
+  created_at: string;
+};
+
 function ChatContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -41,6 +57,14 @@ function ChatContent() {
   const [realtimeStatus, setRealtimeStatus] = useState("CONNECTING");
   const [otherOnline, setOtherOnline] = useState(false);
   const [otherTyping, setOtherTyping] = useState(false);
+  const [workOrders, setWorkOrders] = useState<WorkOrder[]>([]);
+  const [agreementTitle, setAgreementTitle] = useState("");
+  const [agreementDescription, setAgreementDescription] = useState("");
+  const [agreementAmount, setAgreementAmount] = useState("");
+  const [agreementSubmitting, setAgreementSubmitting] = useState(false);
+  const [agreementBusyId, setAgreementBusyId] = useState("");
+  const [agreementNotice, setAgreementNotice] = useState("");
+
 
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
   const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -82,6 +106,23 @@ function ChatContent() {
         )
       );
     }
+  }
+
+  async function loadWorkOrders(id: string) {
+    const { data, error } = await supabase
+      .from("work_orders")
+      .select(
+        "id,conversation_id,client_id,provider_id,proposed_by,proposed_to,title,description,amount_kobo,currency,status,created_at"
+      )
+      .eq("conversation_id", id)
+      .order("created_at", { ascending: false });
+
+    if (error) {
+      setAgreementNotice(`Could not load work agreements: ${error.message}`);
+      return;
+    }
+
+    setWorkOrders((data || []) as WorkOrder[]);
   }
 
   useEffect(() => {
@@ -143,6 +184,7 @@ function ChatContent() {
         other_avatar_url: avatarUrl,
       });
       await loadMessages(conversationId, authData.user.id);
+      await loadWorkOrders(conversationId);
 
       if (active) setLoading(false);
     }
@@ -299,6 +341,18 @@ function ChatContent() {
           );
         }
       )
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "work_orders",
+          filter: `conversation_id=eq.${conversationId}`,
+        },
+        () => {
+          if (active) void loadWorkOrders(conversationId);
+        }
+      )
       .subscribe(async (status) => {
         if (!active) return;
 
@@ -432,6 +486,113 @@ function ChatContent() {
     await loadMessages(conversationId, userId);
   }
 
+
+  async function proposeWorkOrder(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (!conversationId || agreementSubmitting) return;
+
+    const naira = Number(agreementAmount);
+    const amountKobo = Math.round(naira * 100);
+
+    if (!Number.isFinite(naira) || naira <= 0 ||
+        !Number.isSafeInteger(amountKobo) || amountKobo <= 0) {
+      setAgreementNotice("Enter a valid amount in Nigerian naira.");
+      return;
+    }
+
+    setAgreementSubmitting(true);
+    setAgreementNotice("");
+
+    try {
+      const { error } = await supabase.rpc("propose_work_order", {
+        p_conversation_id: conversationId,
+        p_title: agreementTitle.trim(),
+        p_description: agreementDescription.trim(),
+        p_amount_kobo: amountKobo,
+      });
+
+      if (error) throw error;
+
+      setAgreementTitle("");
+      setAgreementDescription("");
+      setAgreementAmount("");
+      setAgreementNotice(
+        "Work agreement proposal sent. No payment has been collected."
+      );
+
+      await loadWorkOrders(conversationId);
+    } catch (error) {
+      setAgreementNotice(
+        error instanceof Error
+          ? error.message
+          : "Could not send the work agreement."
+      );
+    } finally {
+      setAgreementSubmitting(false);
+    }
+  }
+
+  async function respondToWorkOrder(
+    orderId: string,
+    accept: boolean
+  ) {
+    if (agreementBusyId) return;
+
+    setAgreementBusyId(orderId);
+    setAgreementNotice("");
+
+    try {
+      const { data, error } = await supabase.rpc("respond_work_order", {
+        p_work_order_id: orderId,
+        p_accept: accept,
+      });
+
+      if (error) throw error;
+
+      await loadWorkOrders(conversationId!);
+
+      setAgreementNotice(
+        data === "accepted"
+          ? "Agreement accepted. Payment checkout is not enabled yet."
+          : "Agreement declined."
+      );
+    } catch (error) {
+      setAgreementNotice(
+        error instanceof Error
+          ? error.message
+          : "Could not update this agreement."
+      );
+    } finally {
+      setAgreementBusyId("");
+    }
+  }
+
+  async function withdrawWorkOrder(orderId: string) {
+    if (agreementBusyId) return;
+
+    setAgreementBusyId(orderId);
+    setAgreementNotice("");
+
+    try {
+      const { error } = await supabase.rpc("cancel_work_order", {
+        p_work_order_id: orderId,
+      });
+
+      if (error) throw error;
+
+      await loadWorkOrders(conversationId!);
+      setAgreementNotice("Work agreement proposal withdrawn.");
+    } catch (error) {
+      setAgreementNotice(
+        error instanceof Error
+          ? error.message
+          : "Could not withdraw this proposal."
+      );
+    } finally {
+      setAgreementBusyId("");
+    }
+  }
 
   async function startCall(callType: "audio" | "video") {
     if (!conversationId || callStarting) return;
@@ -649,6 +810,218 @@ function ChatContent() {
                 <RefreshCw size={16} /> Refresh
               </button>
             </div>
+
+            <section
+              style={{
+                marginTop: 16,
+                padding: 16,
+                border: "1px solid #dce8df",
+                borderRadius: 12,
+                background: "#fbfdfb",
+              }}
+            >
+              <h3 style={{ margin: "0 0 6px", color: "#173326" }}>
+                Work agreement
+              </h3>
+              <p style={{ margin: "0 0 14px", color: "#64748b", fontSize: 13 }}>
+                Agree on the work description and price here before payment.
+              </p>
+
+              {agreementNotice && (
+                <p className="auth-message" role="status">
+                  {agreementNotice}
+                </p>
+              )}
+
+              {workOrders.length > 0 && (
+                <div style={{ display: "grid", gap: 12, marginBottom: 16 }}>
+                  {workOrders.map((order) => {
+                    const amount = (
+                      Number(order.amount_kobo) / 100
+                    ).toLocaleString("en-NG", {
+                      minimumFractionDigits: 2,
+                      maximumFractionDigits: 2,
+                    });
+
+                    const isRecipient = order.proposed_to === userId;
+                    const isProposer = order.proposed_by === userId;
+
+                    return (
+                      <article
+                        key={order.id}
+                        style={{
+                          padding: 14,
+                          border: "1px solid #e5e7eb",
+                          borderRadius: 10,
+                          background: "#fff",
+                        }}
+                      >
+                        <div style={{
+                          display: "flex",
+                          justifyContent: "space-between",
+                          alignItems: "center",
+                          gap: 10,
+                          flexWrap: "wrap",
+                        }}>
+                          <strong>{order.title}</strong>
+                          <span style={{
+                            fontSize: 12,
+                            fontWeight: 800,
+                            color: order.status === "accepted" ||
+                              order.status === "completed"
+                              ? "#0B7A42"
+                              : order.status === "declined" ||
+                                order.status === "cancelled"
+                                ? "#b42318"
+                                : "#925f05",
+                          }}>
+                            {order.status.replaceAll("_", " ").toUpperCase()}
+                          </span>
+                        </div>
+
+                        <p style={{
+                          margin: "9px 0",
+                          color: "#536153",
+                          whiteSpace: "pre-wrap",
+                          lineHeight: 1.6,
+                        }}>
+                          {order.description}
+                        </p>
+
+                        <p style={{
+                          margin: "8px 0",
+                          color: "#0B7A42",
+                          fontWeight: 800,
+                          fontSize: 18,
+                        }}>
+                          {order.currency} {amount}
+                        </p>
+
+                        <small style={{ color: "#64748b" }}>
+                          Proposed {new Date(order.created_at).toLocaleString()}
+                        </small>
+
+                        {order.status === "proposed" && isRecipient && (
+                          <div style={{
+                            display: "flex",
+                            gap: 8,
+                            flexWrap: "wrap",
+                            marginTop: 12,
+                          }}>
+                            <button
+                              type="button"
+                              className="btn"
+                              disabled={!!agreementBusyId}
+                              onClick={() => void respondToWorkOrder(order.id, true)}
+                            >
+                              {agreementBusyId === order.id
+                                ? "Saving..."
+                                : "Accept agreement"}
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-outline"
+                              disabled={!!agreementBusyId}
+                              onClick={() => void respondToWorkOrder(order.id, false)}
+                            >
+                              Decline
+                            </button>
+                          </div>
+                        )}
+
+                        {order.status === "proposed" && isProposer && (
+                          <button
+                            type="button"
+                            className="btn btn-outline"
+                            disabled={!!agreementBusyId}
+                            onClick={() => void withdrawWorkOrder(order.id)}
+                            style={{ marginTop: 12 }}
+                          >
+                            {agreementBusyId === order.id
+                              ? "Withdrawing..."
+                              : "Withdraw proposal"}
+                          </button>
+                        )}
+
+                        {order.status === "accepted" && (
+                          <p style={{
+                            color: "#64748b",
+                            fontSize: 13,
+                            margin: "12px 0 0",
+                          }}>
+                            Both parties have agreed. Payment checkout will be
+                            available after WORKYARD payment-provider setup.
+                          </p>
+                        )}
+                      </article>
+                    );
+                  })}
+                </div>
+              )}
+
+              <form
+                onSubmit={proposeWorkOrder}
+                style={{ display: "grid", gap: 10 }}
+              >
+                <strong>Propose new work</strong>
+
+                <input
+                  className="auth-input"
+                  value={agreementTitle}
+                  onChange={(event) => setAgreementTitle(event.target.value)}
+                  minLength={3}
+                  maxLength={120}
+                  placeholder="Work title"
+                  required
+                />
+
+                <textarea
+                  className="auth-input"
+                  value={agreementDescription}
+                  onChange={(event) => setAgreementDescription(event.target.value)}
+                  minLength={10}
+                  maxLength={5000}
+                  rows={3}
+                  placeholder="Describe the agreed work, deliverables and expectations..."
+                  required
+                />
+
+                <label style={{ display: "grid", gap: 6, fontSize: 13 }}>
+                  Agreed amount (NGN)
+                  <input
+                    className="auth-input"
+                    type="number"
+                    min="0.01"
+                    step="0.01"
+                    value={agreementAmount}
+                    onChange={(event) => setAgreementAmount(event.target.value)}
+                    placeholder="e.g. 25000"
+                    required
+                  />
+                </label>
+
+                <button
+                  className="btn"
+                  type="submit"
+                  disabled={agreementSubmitting ||
+                    !agreementTitle.trim() ||
+                    !agreementDescription.trim() ||
+                    !agreementAmount}
+                >
+                  {agreementSubmitting
+                    ? "Sending proposal..."
+                    : "Send work agreement"}
+                </button>
+
+                <small style={{ color: "#64748b", lineHeight: 1.5 }}>
+                  The other participant must accept the proposal. This records
+                  the agreement only; it does not charge anyone or hold funds.
+                  Job agreements require an accepted job application.
+                </small>
+              </form>
+            </section>
+
+            <WorkOrderTrustPanel conversationId={conversationId!} userId={userId} />
 
             <div style={{
               flex: 1,

@@ -21,6 +21,7 @@ import {
   Flag,
 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
+import ProfileReviews from "@/components/ProfileReviews";
 
 type ConnectionStatus =
   | "self"
@@ -493,6 +494,8 @@ export default function PublicMemberProfilePage() {
               </div>
             </div>
           </div>
+
+          <ProfileReviews profileId={profile.user_id} />
 
           {profile.about && (
             <section className="wy-public-section">

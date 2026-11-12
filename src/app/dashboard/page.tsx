@@ -17,6 +17,7 @@ import {
   Flag,
   PlusCircle,
   Home,
+  Wallet,
 } from "lucide-react";
 
 type DashboardAccountType = "skill_owner" | "job_seeker" | "hirer";
@@ -81,6 +82,12 @@ const dashboardContent: Record<
         icon: Bell,
         href: "/notifications/",
       },
+      {
+        label: "Payment History",
+        detail: "View your WORKYARD payment records.",
+        icon: Wallet,
+        href: "/payments/",
+      },
     ],
   },
   job_seeker: {
@@ -111,6 +118,12 @@ const dashboardContent: Record<
         detail: "See updates about your jobs, applications and messages.",
         icon: Bell,
         href: "/notifications/",
+      },
+      {
+        label: "Payment History",
+        detail: "View your WORKYARD payment records.",
+        icon: Wallet,
+        href: "/payments/",
       },
     ],
   },
@@ -148,6 +161,12 @@ const dashboardContent: Record<
         detail: "See updates about your jobs, applications and messages.",
         icon: Bell,
         href: "/notifications/",
+      },
+      {
+        label: "Payment History",
+        detail: "View your WORKYARD payment records.",
+        icon: Wallet,
+        href: "/payments/",
       },
     ],
   },
