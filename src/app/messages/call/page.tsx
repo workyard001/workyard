@@ -24,8 +24,20 @@ function CallContent() {
   const [credentials, setCredentials] = useState<CallCredentials | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [callError, setCallError] = useState("");
+  const [callStatus, setCallStatus] = useState("Connecting to call...");
+  const [loadingEnd, setLoadingEnd] = useState(false);
   const [ended, setEnded] = useState(false);
   const finishing = useRef(false);
+  const redirectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  function returnToMessagesSoon() {
+    if (redirectTimer.current) return;
+
+    redirectTimer.current = setTimeout(() => {
+      router.replace("/messages/");
+    }, 900);
+  }
 
   useEffect(() => {
     let active = true;
@@ -98,7 +110,8 @@ function CallContent() {
             )
           ) {
             setEnded(true);
-            setTimeout(() => router.replace("/messages/"), 1200);
+            setCallStatus("Call ended");
+            returnToMessagesSoon();
           }
         }
       )
@@ -110,16 +123,42 @@ function CallContent() {
     };
   }, [callId, router]);
 
+  useEffect(() => {
+    return () => {
+      if (redirectTimer.current) {
+        clearTimeout(redirectTimer.current);
+        redirectTimer.current = null;
+      }
+    };
+  }, []);
+
   async function finishCall() {
     if (!callId || finishing.current) return;
 
     finishing.current = true;
-    await supabase.rpc("finish_workyard_call", {
-      p_call_id: callId,
-    });
+    setLoadingEnd(true);
+    setCallError("");
 
-    setEnded(true);
-    router.replace("/messages/");
+    try {
+      const { error: finishError } = await supabase.rpc(
+        "finish_workyard_call",
+        { p_call_id: callId }
+      );
+
+      if (finishError) throw finishError;
+
+      setEnded(true);
+      setCallStatus("Call ended");
+      returnToMessagesSoon();
+    } catch (finishError) {
+      finishing.current = false;
+      setLoadingEnd(false);
+      setCallError(
+        finishError instanceof Error
+          ? finishError.message
+          : "WORKYARD could not confirm that the call ended. Please try again."
+      );
+    }
   }
 
   if (loading) {
@@ -172,28 +211,52 @@ function CallContent() {
           }}
         >
           <div>
-            <strong>WORKYARD {credentials.call_type === "video" ? "Video" : "Audio"} Call</strong>
-            <p style={{ margin: "4px 0 0", color: "#cbd5e1", fontSize: 12 }}>
-              Keep your conversation moving.
+            <strong>
+              WORKYARD {credentials.call_type === "video" ? "Video" : "Audio"} Call
+            </strong>
+            <p
+              aria-live="polite"
+              style={{ margin: "4px 0 0", color: "#cbd5e1", fontSize: 12 }}
+            >
+              {callStatus}
             </p>
           </div>
 
           <button
             type="button"
             onClick={() => void finishCall()}
+            disabled={loadingEnd}
             style={{
               border: 0,
               borderRadius: 10,
               padding: "11px 16px",
-              background: "#dc2626",
+              background: loadingEnd ? "#7f1d1d" : "#dc2626",
               color: "#fff",
               fontWeight: 700,
-              cursor: "pointer",
+              cursor: loadingEnd ? "wait" : "pointer",
+              opacity: loadingEnd ? 0.8 : 1,
             }}
           >
-            End call
+            {loadingEnd ? "Ending..." : "End call"}
           </button>
         </div>
+
+        {callError && (
+          <div
+            role="alert"
+            style={{
+              margin: "0 0 12px",
+              padding: "11px 13px",
+              border: "1px solid #fca5a5",
+              borderRadius: 10,
+              background: "#450a0a",
+              color: "#fee2e2",
+              fontSize: 14,
+            }}
+          >
+            Call issue: {callError}
+          </div>
+        )}
 
         <div
           data-lk-theme="default"
@@ -211,8 +274,18 @@ function CallContent() {
             connect={true}
             audio={true}
             video={credentials.call_type === "video"}
-            onDisconnected={() => void finishCall()}
-            onError={(callError) => setError(callError.message)}
+            onConnected={() => {
+              setCallStatus("Connected");
+              setCallError("");
+            }}
+            onDisconnected={() => {
+              setCallStatus("Disconnected · closing call...");
+              void finishCall();
+            }}
+            onError={(callIssue) => {
+              setCallError(callIssue.message);
+              setCallStatus("Call connection issue");
+            }}
             style={{ height: "100%" }}
           >
             {credentials.call_type === "video" ? (

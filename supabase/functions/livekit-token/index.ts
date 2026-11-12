@@ -1,5 +1,5 @@
 import { createClient } from "npm:@supabase/supabase-js@2.49.1";
-import { AccessToken } from "npm:livekit-server-sdk@2.19.2";
+import { AccessToken, TrackSource } from "npm:livekit-server-sdk@2.19.2";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -103,9 +103,25 @@ Deno.serve(async (req: Request) => {
 
     const access = accessRows[0];
 
-    if (!access.room_name || access.call_status === "ended") {
+    if (
+      !access.room_name ||
+      access.call_status === "ended" ||
+      !["audio", "video"].includes(access.call_type)
+    ) {
       return response({ error: "This call is no longer available" }, 409);
     }
+
+    // Enforce the selected call type on the server, not only in the UI.
+    // Audio calls can publish microphone audio only; video calls may also
+    // publish camera and screen-share tracks.
+    const allowedTrackSources: TrackSource[] = access.call_type === "video"
+      ? [
+          TrackSource.CAMERA,
+          TrackSource.MICROPHONE,
+          TrackSource.SCREEN_SHARE,
+          TrackSource.SCREEN_SHARE_AUDIO,
+        ]
+      : [TrackSource.MICROPHONE];
 
     const token = new AccessToken(
       livekitApiKey,
@@ -120,6 +136,7 @@ Deno.serve(async (req: Request) => {
       roomJoin: true,
       room: access.room_name,
       canPublish: true,
+      canPublishSources: allowedTrackSources,
       canSubscribe: true,
       canPublishData: true,
     });
