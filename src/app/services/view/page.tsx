@@ -34,6 +34,10 @@ type Profile = {
   location: string | null;
 };
 
+function isIdentityApproved(status: string | null | undefined) {
+  return status === "approved" || status === "verified";
+}
+
 function ServiceDetails() {
   const searchParams = useSearchParams();
   const router = useRouter();
@@ -47,6 +51,8 @@ function ServiceDetails() {
   const [notice, setNotice] = useState("");
 
   useEffect(() => {
+    let active = true;
+
     async function load() {
       if (!serviceId) {
         setNotice("No service was selected.");
@@ -55,24 +61,22 @@ function ServiceDetails() {
       }
 
       const { data: auth } = await supabase.auth.getUser();
-
       if (!auth.user) {
         router.replace("/login/");
         return;
       }
-
+      if (!active) return;
       setUserId(auth.user.id);
 
       const { data, error } = await supabase
         .from("services")
-        .select(
-          "id,owner_id,title,category,description,location,price_type,price_amount,currency,cover_image_path,status"
-        )
+        .select("id,owner_id,title,category,description,location,price_type,price_amount,currency,cover_image_path,status")
         .eq("id", serviceId)
         .maybeSingle();
 
+      if (!active) return;
       if (error || !data) {
-        setNotice(error?.message || "This service could not be found.");
+        setNotice(error?.message || "This service is unavailable in your registered LGA and state, or it has been removed.");
         setLoading(false);
         return;
       }
@@ -80,29 +84,27 @@ function ServiceDetails() {
       const selected = data as Service;
       setService(selected);
 
-      const { data: personData, error: personError } =
-        await supabase.rpc("get_member_profile_v2", {
-          p_profile_id: selected.owner_id,
-        });
+      const { data: personData, error: personError } = await supabase.rpc(
+        "get_member_profile_v2",
+        { p_profile_id: selected.owner_id }
+      );
 
-      const person = Array.isArray(personData)
-        ? personData[0]
-        : personData;
+      if (!active) return;
+      const person = Array.isArray(personData) ? personData[0] : personData;
 
       if (personError) {
         console.error("Could not load provider profile:", personError.message);
         setProvider(null);
       } else if (person) {
         let avatarUrl: string | null = null;
-
         if (person.avatar_path) {
           const { data: photo } = await supabase.storage
             .from("profile-photos")
             .createSignedUrl(person.avatar_path, 3600);
-
           avatarUrl = photo?.signedUrl || null;
         }
 
+        if (!active) return;
         setProvider({
           id: person.user_id,
           full_name: person.full_name || "WORKYARD Member",
@@ -113,15 +115,18 @@ function ServiceDetails() {
       } else {
         setProvider(null);
       }
-      setLoading(false);
+
+      if (active) setLoading(false);
     }
 
     void load();
+    return () => {
+      active = false;
+    };
   }, [serviceId, router]);
 
   async function contactProvider() {
     if (!service || contacting) return;
-
     if (service.owner_id === userId) {
       setNotice("This is your own service listing.");
       return;
@@ -142,16 +147,13 @@ function ServiceDetails() {
     }
 
     let conversationId: string | null = null;
-
     if (typeof data === "string") {
       conversationId = data;
     } else if (Array.isArray(data)) {
-      conversationId =
-        data[0]?.conversation_id || data[0]?.id || null;
+      conversationId = data[0]?.conversation_id || data[0]?.id || null;
     } else if (data && typeof data === "object") {
       conversationId =
-        (data as { conversation_id?: string; id?: string })
-          .conversation_id ||
+        (data as { conversation_id?: string; id?: string }).conversation_id ||
         (data as { id?: string }).id ||
         null;
     }
@@ -162,31 +164,19 @@ function ServiceDetails() {
       return;
     }
 
-    router.push(
-      `/messages/chat/?id=${encodeURIComponent(conversationId)}`
-    );
+    router.push(`/messages/chat/?id=${encodeURIComponent(conversationId)}`);
   }
 
   function price() {
     if (!service) return "";
-
     if (service.price_type === "negotiable") return "Price negotiable";
 
-    const amount = `${service.currency || "NGN"} ${Number(
-      service.price_amount || 0
-    ).toLocaleString()}`;
-
-    return service.price_type === "hourly"
-      ? `${amount} / hour`
-      : amount;
+    const amount = `${service.currency || "NGN"} ${Number(service.price_amount || 0).toLocaleString()}`;
+    return service.price_type === "hourly" ? `${amount} / hour` : amount;
   }
 
   if (loading) {
-    return (
-      <main className="dashboard-loading">
-        Loading service details...
-      </main>
-    );
+    return <main className="dashboard-loading">Loading service details...</main>;
   }
 
   if (!service) {
@@ -198,206 +188,88 @@ function ServiceDetails() {
           </Link>
           <h1 style={{ marginTop: 24 }}>Service unavailable</h1>
           <p className="auth-message">{notice}</p>
-          <Link href="/workers/" className="auth-button">
-            Find another worker
-          </Link>
+          <Link href="/workers/" className="auth-button">Find another worker</Link>
         </div>
       </main>
     );
   }
 
   const imageUrl = service.cover_image_path
-    ? supabase.storage
-        .from("service-photos")
-        .getPublicUrl(service.cover_image_path).data.publicUrl
+    ? supabase.storage.from("service-photos").getPublicUrl(service.cover_image_path).data.publicUrl
     : null;
-
   const isOwner = service.owner_id === userId;
-  const isVerified = provider?.verification_status === "verified";
+  const isVerified = isIdentityApproved(provider?.verification_status);
 
   return (
     <main className="profile-page">
-      <div
-        className="profile-card"
-        style={{ maxWidth: 900, width: "100%" }}
-      >
+      <div className="profile-card" style={{ maxWidth: 900, width: "100%" }}>
         <Link href="/workers/" className="profile-back">
           <ArrowLeft size={16} /> Back to workers
         </Link>
 
         <div style={{ marginTop: 24 }}>
           {imageUrl ? (
-            <img
-              src={imageUrl}
-              alt={service.title}
-              style={{
-                width: "100%",
-                maxHeight: 390,
-                objectFit: "cover",
-                borderRadius: 14,
-              }}
-            />
+            <img src={imageUrl} alt={service.title} style={{ width: "100%", maxHeight: 390, objectFit: "cover", borderRadius: 14 }} />
           ) : (
-            <div
-              style={{
-                height: 230,
-                background: "#e6f5eb",
-                borderRadius: 14,
-                display: "grid",
-                placeItems: "center",
-                color: "#0B7A42",
-                fontWeight: 800,
-                fontSize: 20,
-              }}
-            >
-              <BriefcaseBusiness size={42} />
-              WORKYARD SERVICE
+            <div style={{ height: 230, background: "#e6f5eb", borderRadius: 14, display: "grid", placeItems: "center", color: "#0B7A42", fontWeight: 800, fontSize: 20 }}>
+              <BriefcaseBusiness size={42} /> WORKYARD SERVICE
             </div>
           )}
         </div>
 
         <div style={{ marginTop: 24 }}>
-          <span
-            style={{
-              color: "#0B7A42",
-              fontWeight: 800,
-              fontSize: 13,
-            }}
-          >
-            {service.category}
-          </span>
-
-          <h1 style={{ margin: "8px 0 12px" }}>
-            {service.title}
-          </h1>
-
-          <h2 style={{ color: "#0B7A42", margin: "0 0 16px" }}>
-            {price()}
-          </h2>
-
+          <span style={{ color: "#0B7A42", fontWeight: 800, fontSize: 13 }}>{service.category}</span>
+          <h1 style={{ margin: "8px 0 12px" }}>{service.title}</h1>
+          <h2 style={{ color: "#0B7A42", margin: "0 0 16px" }}>{price()}</h2>
           <p style={{ color: "#64748b", lineHeight: 1.7 }}>
-            <MapPin
-              size={16}
-              style={{ verticalAlign: "middle" }}
-            />{" "}
-            {service.location}
+            <MapPin size={16} style={{ verticalAlign: "middle" }} /> {service.location}
           </p>
 
-          <hr
-            style={{
-              border: 0,
-              borderTop: "1px solid #e5e7eb",
-              margin: "24px 0",
-            }}
-          />
-
+          <hr style={{ border: 0, borderTop: "1px solid #e5e7eb", margin: "24px 0" }} />
           <h2>About this service</h2>
-          <p style={{ lineHeight: 1.8, whiteSpace: "pre-wrap" }}>
-            {service.description}
-          </p>
+          <p style={{ lineHeight: 1.8, whiteSpace: "pre-wrap" }}>{service.description}</p>
 
-          <hr
-            style={{
-              border: 0,
-              borderTop: "1px solid #e5e7eb",
-              margin: "24px 0",
-            }}
-          />
-
+          <hr style={{ border: 0, borderTop: "1px solid #e5e7eb", margin: "24px 0" }} />
           <h2>Service provider</h2>
 
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 14,
-              marginTop: 16,
-              flexWrap: "wrap",
-            }}
-          >
+          <div style={{ display: "flex", alignItems: "center", gap: 14, marginTop: 16, flexWrap: "wrap" }}>
             {provider?.avatar_url ? (
-              <img
-                src={provider.avatar_url}
-                alt=""
-                style={{
-                  width: 58,
-                  height: 58,
-                  borderRadius: "50%",
-                  objectFit: "cover",
-                }}
-              />
+              <img src={provider.avatar_url} alt="" style={{ width: 58, height: 58, borderRadius: "50%", objectFit: "cover" }} />
             ) : (
-              <div
-                style={{
-                  width: 58,
-                  height: 58,
-                  borderRadius: "50%",
-                  background: "#e6f5eb",
-                  color: "#0B7A42",
-                  display: "grid",
-                  placeItems: "center",
-                  fontWeight: 800,
-                  fontSize: 20,
-                }}
-              >
+              <div style={{ width: 58, height: 58, borderRadius: "50%", background: "#e6f5eb", color: "#0B7A42", display: "grid", placeItems: "center", fontWeight: 800, fontSize: 20 }}>
                 {(provider?.full_name || "W").charAt(0).toUpperCase()}
               </div>
             )}
 
             <div>
-              <strong>
-                {provider?.full_name || "WORKYARD provider"}
-              </strong>
-
+              <strong>{provider?.full_name || "WORKYARD provider"}</strong>
               <p style={{ margin: "5px 0", color: "#64748b" }}>
                 {isVerified ? (
                   <span style={{ color: "#0B7A42" }}>
-                    <BadgeCheck
-                      size={15}
-                      style={{ verticalAlign: "middle" }}
-                    />{" "}
-                    Identity verified
+                    <BadgeCheck size={15} style={{ verticalAlign: "middle" }} /> Identity verified
                   </span>
-                ) : (
-                  "Identity not yet verified"
-                )}
+                ) : "Identity not yet verified"}
               </p>
-
-              {provider?.location && (
-                <p style={{ margin: 0, color: "#64748b", fontSize: 13 }}>
-                  {provider.location}
-                </p>
+              {provider?.location && <p style={{ margin: 0, color: "#64748b", fontSize: 13 }}>{provider.location}</p>}
+              {provider?.id && (
+                <Link href={`/profile/view/?id=${encodeURIComponent(provider.id)}`} style={{ display: "inline-block", marginTop: 8, color: "#0B7A42", fontWeight: 700, fontSize: 13 }}>
+                  View provider profile
+                </Link>
               )}
             </div>
           </div>
 
-          {notice && (
-            <p className="auth-message" style={{ marginTop: 18 }}>
-              {notice}
-            </p>
-          )}
+          {notice && <p className="auth-message" style={{ marginTop: 18 }} role="status">{notice}</p>}
 
           <button
             type="button"
             className="auth-button"
-            onClick={contactProvider}
+            onClick={() => void contactProvider()}
             disabled={isOwner || contacting}
-            style={{
-              marginTop: 26,
-              maxWidth: 340,
-              opacity: isOwner || contacting ? 0.65 : 1,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: 9,
-            }}
+            style={{ marginTop: 26, maxWidth: 340, opacity: isOwner || contacting ? 0.65 : 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 9 }}
           >
             <MessageCircle size={18} />
-            {isOwner
-              ? "This is your service"
-              : contacting
-              ? "Opening conversation..."
-              : "Contact provider"}
+            {isOwner ? "This is your service" : contacting ? "Opening conversation..." : "Contact provider"}
           </button>
         </div>
       </div>
@@ -407,13 +279,7 @@ function ServiceDetails() {
 
 export default function ServiceViewPage() {
   return (
-    <Suspense
-      fallback={
-        <main className="dashboard-loading">
-          Loading service...
-        </main>
-      }
-    >
+    <Suspense fallback={<main className="dashboard-loading">Loading service...</main>}>
       <ServiceDetails />
     </Suspense>
   );

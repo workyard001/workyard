@@ -27,6 +27,10 @@ type Profile = {
   location: string | null;
 };
 
+function isIdentityApproved(status: string | null | undefined) {
+  return status === "approved" || status === "verified";
+}
+
 export default function FindWorkersPage() {
   const router = useRouter();
 
@@ -39,6 +43,8 @@ export default function FindWorkersPage() {
   const [notice, setNotice] = useState("");
 
   useEffect(() => {
+    let active = true;
+
     async function load() {
       const { data: auth } = await supabase.auth.getUser();
 
@@ -52,6 +58,8 @@ export default function FindWorkersPage() {
         .select("id,owner_id,title,category,description,location,price_type,price_amount,currency,cover_image_path")
         .eq("status", "published")
         .order("created_at", { ascending: false });
+
+      if (!active) return;
 
       if (error) {
         setNotice(error.message);
@@ -67,26 +75,24 @@ export default function FindWorkersPage() {
       if (ids.length) {
         const results = await Promise.all(
           ids.map(async (id) => {
-            const { data, error } = await supabase.rpc(
+            const { data: profileData, error: profileError } = await supabase.rpc(
               "get_member_profile_v2",
               { p_profile_id: id }
             );
 
-            if (error) {
-              console.error("Could not load worker profile:", error.message);
+            if (profileError) {
+              console.error("Could not load worker profile:", profileError.message);
               return null;
             }
 
-            const person = Array.isArray(data) ? data[0] : data;
+            const person = Array.isArray(profileData) ? profileData[0] : profileData;
             if (!person) return null;
 
             let avatarUrl: string | null = null;
-
             if (person.avatar_path) {
               const { data: photo } = await supabase.storage
                 .from("profile-photos")
                 .createSignedUrl(person.avatar_path, 3600);
-
               avatarUrl = photo?.signedUrl || null;
             }
 
@@ -100,34 +106,34 @@ export default function FindWorkersPage() {
           })
         );
 
-        const map: Record<string, Profile> = {};
+        if (!active) return;
 
+        const map: Record<string, Profile> = {};
         results.forEach((person) => {
           if (person) map[person.id] = person;
         });
-
         setProfiles(map);
       }
 
-      setLoading(false);
+      if (active) setLoading(false);
     }
 
     void load();
+    return () => {
+      active = false;
+    };
   }, [router]);
 
   const categories = useMemo(
     () => [
       "All",
-      ...Array.from(
-        new Set(services.map((item) => item.category).filter(Boolean))
-      ).sort(),
+      ...Array.from(new Set(services.map((item) => item.category).filter(Boolean))).sort(),
     ],
     [services]
   );
 
   const filtered = services.filter((item) => {
     const person = profiles[item.owner_id];
-
     const haystack = [
       item.title,
       item.description,
@@ -145,18 +151,13 @@ export default function FindWorkersPage() {
 
   function price(item: Service) {
     if (item.price_type === "negotiable") return "Negotiable";
-
     return `NGN ${Number(item.price_amount || 0).toLocaleString()}${
       item.price_type === "hourly" ? " / hour" : ""
     }`;
   }
 
   if (loading) {
-    return (
-      <main className="dashboard-loading">
-        Finding trusted service providers...
-      </main>
-    );
+    return <main className="dashboard-loading">Finding trusted service providers...</main>;
   }
 
   return (
@@ -167,12 +168,11 @@ export default function FindWorkersPage() {
         </Link>
 
         <h1 style={{ marginTop: 22 }}>Find a Worker</h1>
-
         <p style={{ color: "#64748b" }}>
-          Discover skilled people offering services in your community.
+          Discover skilled people offering services in your community. Results are limited to providers registered in your LGA and state.
         </p>
 
-        {notice && <p className="auth-message">{notice}</p>}
+        {notice && <p className="auth-message" role="status">{notice}</p>}
 
         <div style={{
           display: "grid",
@@ -181,12 +181,7 @@ export default function FindWorkersPage() {
           margin: "22px 0",
         }}>
           <div style={{ position: "relative" }}>
-            <Search size={17} style={{
-              position: "absolute",
-              left: 12,
-              top: 14,
-              color: "#64748b",
-            }} />
+            <Search size={17} style={{ position: "absolute", left: 12, top: 14, color: "#64748b" }} />
             <input
               className="auth-input"
               style={{ paddingLeft: 38 }}
@@ -196,14 +191,8 @@ export default function FindWorkersPage() {
             />
           </div>
 
-          <select
-            className="auth-input"
-            value={category}
-            onChange={(event) => setCategory(event.target.value)}
-          >
-            {categories.map((item) => (
-              <option key={item} value={item}>{item}</option>
-            ))}
+          <select className="auth-input" value={category} onChange={(event) => setCategory(event.target.value)}>
+            {categories.map((item) => <option key={item} value={item}>{item}</option>)}
           </select>
 
           <input
@@ -215,108 +204,55 @@ export default function FindWorkersPage() {
         </div>
 
         <p style={{ color: "#64748b", fontSize: 13 }}>
-          {filtered.length} service{filtered.length === 1 ? "" : "s"} found
+          {filtered.length} local service{filtered.length === 1 ? "" : "s"} found
         </p>
 
         {filtered.length === 0 ? (
           <div style={{ textAlign: "center", padding: 45 }}>
-            <h2>No matching services</h2>
+            <h2>No matching local services</h2>
             <p style={{ color: "#64748b" }}>
-              Try another skill or location.
+              There are no published services in your registered LGA and state matching these filters. Try another search or check your profile location.
             </p>
+            <Link href="/profile/" className="btn">Check my profile location</Link>
           </div>
         ) : (
-          <div style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fit,minmax(250px,1fr))",
-            gap: 16,
-          }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(250px,1fr))", gap: 16 }}>
             {filtered.map((item) => {
               const person = profiles[item.owner_id];
-
               const imageUrl = item.cover_image_path
-                ? supabase.storage
-                    .from("service-photos")
-                    .getPublicUrl(item.cover_image_path).data.publicUrl
+                ? supabase.storage.from("service-photos").getPublicUrl(item.cover_image_path).data.publicUrl
                 : null;
 
               return (
                 <Link
                   key={item.id}
                   href={`/services/view/?id=${encodeURIComponent(item.id)}`}
-                  style={{
-                    border: "1px solid #e5e7eb",
-                    borderRadius: 14,
-                    overflow: "hidden",
-                    textDecoration: "none",
-                    color: "inherit",
-                    display: "block",
-                  }}
+                  style={{ border: "1px solid #e5e7eb", borderRadius: 14, overflow: "hidden", textDecoration: "none", color: "inherit", display: "block" }}
                 >
                   {imageUrl ? (
-                    <img
-                      src={imageUrl}
-                      alt=""
-                      style={{
-                        width: "100%",
-                        height: 165,
-                        objectFit: "cover",
-                      }}
-                    />
+                    <img src={imageUrl} alt="" style={{ width: "100%", height: 165, objectFit: "cover" }} />
                   ) : (
-                    <div style={{
-                      height: 165,
-                      background: "#e6f5eb",
-                      display: "grid",
-                      placeItems: "center",
-                      color: "#0B7A42",
-                      fontWeight: 800,
-                    }}>
+                    <div style={{ height: 165, background: "#e6f5eb", display: "grid", placeItems: "center", color: "#0B7A42", fontWeight: 800 }}>
                       WORKYARD SERVICE
                     </div>
                   )}
 
                   <div style={{ padding: 16 }}>
-                    <span style={{
-                      fontSize: 12,
-                      color: "#0B7A42",
-                      fontWeight: 800,
-                    }}>
-                      {item.category}
-                    </span>
-
+                    <span style={{ fontSize: 12, color: "#0B7A42", fontWeight: 800 }}>{item.category}</span>
                     <h3 style={{ margin: "7px 0" }}>{item.title}</h3>
 
-                    <p style={{
-                      color: "#64748b",
-                      fontSize: 13,
-                      margin: "0 0 10px",
-                    }}>
+                    <p style={{ color: "#64748b", fontSize: 13, margin: "0 0 10px" }}>
                       {person?.full_name || "WORKYARD provider"}
-
-                      {person?.verification_status === "verified" && (
-                        <BadgeCheck
-                          size={14}
-                          style={{
-                            verticalAlign: "middle",
-                            color: "#0B7A42",
-                          }}
-                        />
+                      {isIdentityApproved(person?.verification_status) && (
+                        <BadgeCheck size={14} aria-label="Identity verified" title="Identity verified" style={{ verticalAlign: "middle", color: "#0B7A42", marginLeft: 4 }} />
                       )}
                     </p>
 
-                    <p style={{
-                      fontSize: 13,
-                      color: "#64748b",
-                      margin: "0 0 10px",
-                    }}>
-                      <MapPin size={14} style={{ verticalAlign: "middle" }} />
-                      {" "}{item.location}
+                    <p style={{ fontSize: 13, color: "#64748b", margin: "0 0 10px" }}>
+                      <MapPin size={14} style={{ verticalAlign: "middle" }} /> {item.location}
                     </p>
 
-                    <strong style={{ color: "#0B7A42" }}>
-                      {price(item)}
-                    </strong>
+                    <strong style={{ color: "#0B7A42" }}>{price(item)}</strong>
                   </div>
                 </Link>
               );
