@@ -77,6 +77,7 @@ function ChatContent() {
   const [agreementSubmitting, setAgreementSubmitting] = useState(false);
   const [agreementBusyId, setAgreementBusyId] = useState("");
   const [agreementNotice, setAgreementNotice] = useState("");
+  const [paymentBusyId, setPaymentBusyId] = useState("");
   const [attachments, setAttachments] = useState<Record<string, MessageAttachment[]>>({});
   const [attachmentBusy, setAttachmentBusy] = useState(false);
   const [attachmentNotice, setAttachmentNotice] = useState("");
@@ -861,7 +862,7 @@ function ChatContent() {
 
       setAgreementNotice(
         data === "accepted"
-          ? "Agreement accepted. Payment checkout is not enabled yet."
+          ? "Agreement accepted. The client can now continue to Paystack checkout."
           : "Agreement declined."
       );
     } catch (error) {
@@ -872,6 +873,39 @@ function ChatContent() {
       );
     } finally {
       setAgreementBusyId("");
+    }
+  }
+
+  async function startWorkOrderPayment(orderId: string) {
+    if (!userId || paymentBusyId) return;
+
+    setPaymentBusyId(orderId);
+    setAgreementNotice("");
+
+    try {
+      const { data, error } = await supabase.functions.invoke(
+        "initialize-workyard-payment",
+        { body: { work_order_id: orderId } },
+      );
+
+      if (error) throw error;
+
+      const checkoutUrl = data?.authorization_url;
+      if (
+        typeof checkoutUrl !== "string" ||
+        !checkoutUrl.startsWith("https://checkout.paystack.com/")
+      ) {
+        throw new Error(data?.error || "WORKYARD did not receive a valid Paystack checkout link.");
+      }
+
+      window.location.assign(checkoutUrl);
+    } catch (error) {
+      setAgreementNotice(
+        error instanceof Error
+          ? `Could not start Paystack checkout: ${error.message}`
+          : "Could not start Paystack checkout. Please try again."
+      );
+      setPaymentBusyId("");
     }
   }
 
@@ -1175,6 +1209,7 @@ function ChatContent() {
                             fontSize: 12,
                             fontWeight: 800,
                             color: order.status === "accepted" ||
+                              order.status === "paid" ||
                               order.status === "completed"
                               ? "#0B7A42"
                               : order.status === "declined" ||
@@ -1250,14 +1285,44 @@ function ChatContent() {
                           </button>
                         )}
 
-                        {order.status === "accepted" && (
+                        {order.status === "accepted" && order.client_id === userId && (
+                          <div style={{ display: "grid", gap: 9, marginTop: 12 }}>
+                            <button
+                              type="button"
+                              className="btn"
+                              disabled={paymentBusyId === order.id || !!paymentBusyId}
+                              onClick={() => void startWorkOrderPayment(order.id)}
+                            >
+                              {paymentBusyId === order.id
+                                ? "Preparing secure checkout..."
+                                : "Pay securely with Paystack"}
+                            </button>
+                            <small style={{ color: "#64748b", lineHeight: 1.6 }}>
+                              Paystack will process this payment to WORKYARD. This checkout does not automatically transfer funds to the provider or provide escrow; provider payouts are handled separately.
+                            </small>
+                          </div>
+                        )}
+
+                        {order.status === "accepted" && order.provider_id === userId && (
                           <p style={{
                             color: "#64748b",
                             fontSize: 13,
+                            lineHeight: 1.6,
                             margin: "12px 0 0",
                           }}>
-                            Both parties have agreed. Payment checkout will be
-                            available after WORKYARD payment-provider setup.
+                            Waiting for the client to complete Paystack checkout. WORKYARD will update this agreement after verifying the payment.
+                          </p>
+                        )}
+
+                        {order.status === "paid" && (
+                          <p style={{
+                            color: "#0B7A42",
+                            fontSize: 13,
+                            lineHeight: 1.6,
+                            margin: "12px 0 0",
+                            fontWeight: 700,
+                          }}>
+                            Payment verified by WORKYARD. Provider payout is handled separately; this confirmation does not mean funds have been transferred to the provider.
                           </p>
                         )}
                       </article>
